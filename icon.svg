@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="禅道 AI 工作台">
+  <!-- 原创建形：禅道「虫」形 + 右侧 AI 处理勾选 -->
+  <path d="M4.2 8.6h5.4"/>
+  <path d="M3.6 13h5.6"/>
+  <path d="M4.6 17.2l4.4-2.2"/>
+  <rect x="8.2" y="6.2" width="7.6" height="12.2" rx="3.8"/>
+  <path d="M9.6 6.4 8.6 4.4"/>
+  <path d="M14.4 6.4l1-2"/>
+  <path d="M11.4 10.4h.02"/>
+  <path d="M12.8 10.4h.02"/>
+  <path d="M16 12.6h3.6"/>
+  <path d="M18.4 15.6l1.5 1.5 2.6-3"/>
+</svg>

@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 验证/测试产物：内含本机禅道账号密码、会话 cookie、业务数据，
+# 只在本机保留（复现方法见 README「开发与自测」），不随仓库分发。
+verify/
+
+# 运行期下载的禅道附件
+.zentao-attachments/
+
+# 本机配置与凭据（永远不要提交）
+.zentao-panel/
+config.json
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+.idea/
+.vscode/

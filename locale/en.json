@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ZenTao AI workbench",
+    "description": "Load ZenTao bugs or tasks from a browse URL, hand selected items to a DSH session, and let the agent write comments and status back to ZenTao."
+  }
+}

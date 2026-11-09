@@ -1,0 +1,5 @@
+# dsh-zentao-ai-workbench bundle patch：把插件挂到 profile 加载树。
+# 单包双半边：host（lib/index.js）+ client（dsh.client 声明的 client/client.js）。
+- insert:
+    - id: dsh-zentao-ai-workbench
+      name: dsh-zentao-ai-workbench
