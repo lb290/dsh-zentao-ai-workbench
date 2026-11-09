@@ -2,6 +2,14 @@
   "name": "dsh-zentao-ai-workbench",
   "version": "0.1.0",
   "description": "DeepSeek Harness（DSH）禅道 AI 工作台：输入禅道链接取 Bug 列表，多选后交给已有/新会话，AI 处理完直接回写备注与状态。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lb290/dsh-zentao-ai-workbench.git"
+  },
+  "homepage": "https://github.com/lb290/dsh-zentao-ai-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/lb290/dsh-zentao-ai-workbench/issues"
+  },
   "license": "MIT",
   "private": true,
   "type": "module",
