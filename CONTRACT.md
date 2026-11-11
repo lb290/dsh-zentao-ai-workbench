@@ -18,6 +18,9 @@
 
 - 包名 `dsh-zentao-ai-workbench`（目录 `/Users/bing/Documents/workspeace/dsh-zentao-ai-workbench`）。
 - host 入口 `lib/index.js`，`export function apply(ctx, config)`，`export const inject = ['tools']`（webServer/connection 懒取，不写进 inject）。
+  - 懒取的正确形式是 `ctx.inject(['webServer'], (c) => c.effect(() => …))`：Loader 并发挂载 entry，
+    这两个服务的 fiber 在插件 apply 时往往还没 ACTIVE，`ctx.get()` 严格读会拿到 undefined；
+    一次性探测会让通道永远挂不上，面板所有请求落到 SPA 兜底（POST → HTTP 405）。见 `tests/rpc-mount.test.mjs`。
 - client 入口 `client/client.js`，`dsh.client` 声明装载，`platform: 'web'`。
 - 配置文件（host 运行时写）：`~/.dsh/zentao-ai-workbench/config.json`（首次启动自动从
   `~/.dsh/zentao-panel/config.json` 导入账号与 cookie）。

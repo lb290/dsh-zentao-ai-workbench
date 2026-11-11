@@ -1279,7 +1279,9 @@
       function ZentaoPanel() {
         var [status, setStatus] = useState(paneCache.status);
         var [statusError, setStatusError] = useState(false);
-        var [url, setUrl] = useState(paneCache.url || loadLastUrl() || EXAMPLE_URL);
+        // 不要把 EXAMPLE_URL 当默认值写进输入框：示例地址与真实实例不同源，
+        // 用户直接点「读取」只会拿到「链接与已登录实例不同源」。示例留在 placeholder 里。
+        var [url, setUrl] = useState(paneCache.url || loadLastUrl() || '');
         var [list, setList] = useState(paneCache.list);
         var [selected, setSelected] = useState(paneCache.selected || {});
         var [expanded, setExpanded] = useState(paneCache.expanded || {});
