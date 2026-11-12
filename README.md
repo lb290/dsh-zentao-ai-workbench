@@ -90,10 +90,12 @@ AI 主动用 `zentao_item_detail` 复核时同样能拿到备注文字、备注�
 
 ## 已知限制
 
+- **备注回写已在真实实例上真写验证**（`tools/probe-writeback.mjs --kind bug --id <id> --action comment --comment "…" --write`，
+  写完用 v1 详情回读「历史记录」确认落库）；Bug 的 resolve / close / activate 由作者早期在真实条目上实测通过。
 - 任务/需求的状态表单已在真实实例上读取并核对字段（task 的 start/finish/close/activate、story 的 activate 表单
-  均能正确解析出 `finishedDate` / `realStarted` / `assignedTo` 等默认值），但**真的 POST 写回尚未实测**——
+  均能正确解析出 `finishedDate` / `realStarted` / `assignedTo` 等默认值），但 **task/story 的状态流转 POST 尚未实测**——
   首次使用建议按下面「真机试跑」对自己建的测试条目各跑一次。
-  另外禅道的写权限是按动作授予的：本机实测的账号就没有 `story-close` 权限（禅道 302 到
+- 禅道的写权限是按动作授予的：本机实测的账号就没有 `story-close` 权限（禅道 302 到
   `user-deny-story-close.html`，插件会明确报「没有 close 权限」，不会假装成功）。
 - 当前账号若没有某动作权限（如删除），禅道会拒绝，插件会把原话回显，不会假装成功。
 - 一次选中超过 20 条时，面板只自动并发拉取前 20 条的详情（其余用列表摘要下发，不带备注与图片）；
