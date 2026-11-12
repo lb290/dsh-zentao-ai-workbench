@@ -90,8 +90,11 @@ AI 主动用 `zentao_item_detail` 复核时同样能拿到备注文字、备注�
 
 ## 已知限制
 
-- 任务/需求的状态表单未在真实条目上做过状态流转实测（bug 的 comment/resolve/close/activate 已实测通过）；
-  两者共用同一套「读表单默认值 + 合并 + POST」代码路径，但表单字段不同，首次使用建议先单条试跑。
+- 任务/需求的状态表单已在真实实例上读取并核对字段（task 的 start/finish/close/activate、story 的 activate 表单
+  均能正确解析出 `finishedDate` / `realStarted` / `assignedTo` 等默认值），但**真的 POST 写回尚未实测**——
+  首次使用建议按下面「真机试跑」对自己建的测试条目各跑一次。
+  另外禅道的写权限是按动作授予的：本机实测的账号就没有 `story-close` 权限（禅道 302 到
+  `user-deny-story-close.html`，插件会明确报「没有 close 权限」，不会假装成功）。
 - 当前账号若没有某动作权限（如删除），禅道会拒绝，插件会把原话回显，不会假装成功。
 - 一次选中超过 20 条时，面板只自动并发拉取前 20 条的详情（其余用列表摘要下发，不带备注与图片）；
   要拿到全部内容，可以展开单条、分批处理，或让 AI 用 `zentao_item_detail` 复核单条。
@@ -120,6 +123,8 @@ lib/tools.mjs         5 个 Agent 工具
 client/client.js      左侧栏图标 + 主面板 + 会话头部按钮（只依赖 react）
 locale/               插件展示名与描述
 tests/                离线测试：假禅道服务 + node:test（无需 DSH、无需真机、无需账号）
+tools/probe-writeback.mjs  真机探针：默认只读干跑，--write 才真写（凭据取自本机配置）
+assets/icon-180.png   插件市场卡片图标（GitHub 托管的位图）
 ```
 
 离线测试（全部跑在本机 127.0.0.1 的假禅道服务上，不连任何真实实例）：
@@ -129,21 +134,32 @@ npm test                                        # = node --test tests/*.test.mjs
 node --test --test-isolation=none "tests/*.test.mjs"   # 受限沙箱禁子进程时（spawn EPERM）用同进程模式
 ```
 
-覆盖：登录握手与 `verifyRand` 两种响应形态、浏览页 `.json` 双层信封（bug dict / task-story 数组）、
+覆盖：登录握手与 `verifyRand` 两种响应形态、浏览页 `.json` 双层信封（bug dict / task-story dict 与数组两种形态）、
 v1 详情与备注图/附件归一、`action-comment` 取 uid + 提交、状态表单「读默认值 → 合并 → POST」、
 图片嗅探与「200 但返回 HTML 提示页」的拒绝路径、配置读写与旧面板导入、缓存失效与附件落盘。
 
-登录真实禅道的探针脚本（含本机账号与会话 cookie）**不随仓库分发**，需要时按以下方式自建：
+### 真机试跑（状态流转）
 
-1. 复制 `lib/zentao-client.mjs` 的登录流程写一个探针脚本，账号密码从环境变量读
-   （如 `ZT_ACCOUNT` / `ZT_PASSWORD`），实例地址从 `ZT_BASE_URL` 读，**不要硬编码**。
-2. 只读冒烟：取浏览页 `.json` 断言条数与 `pager.recTotal`；取 v1 详情断言
-   `images` / `commentImages` / `files` / `actions` 字段。
-3. 写回冒烟：**先自己建一条测试 Bug**，只对它做 comment → resolve → close，
-   每次用 v1 详情核对 `status` / `resolution` / `actions` 变化。
-   ⚠️ 不要拿真实业务条目做写回测试——禅道会通知同事。
-4. `node --check` 检查语法；插件改完用 `plugin_manager` 重新加载，
-   面板侧改动需要刷新页面才生效。
+`tools/probe-writeback.mjs` 用本机已配置的账号跑真实禅道（凭据从 `~/.dsh/zentao-ai-workbench/config.json`
+读取，不带任何硬编码账号；**默认只读**，只 GET 表单、不提交）：
+
+```bash
+# 1) 拿到自己的条目 id
+node tools/probe-writeback.mjs --list task
+node tools/probe-writeback.mjs --list story
+
+# 2) 干跑：只读表单，打印解析出的字段与必填项检查（没有任何写操作）
+node tools/probe-writeback.mjs --kind task --id <id> --action finish
+node tools/probe-writeback.mjs --kind story --id <id> --action activate
+
+# 3) 真写：会进禅道历史记录、可能通知同事 —— 只对「自己建的测试条目」做
+node tools/probe-writeback.mjs --kind task --id <id> --action finish --comment "ZTAW 写回测试" --write
+```
+
+真写结束后探针会用 v1 详情回读 `status` 与最近动态，确认状态真的变了、备注真的落到「历史记录」。
+用它自测或报 issue 都能直接证明「这条链路在你的实例上通不通」。
+
+手动对真实业务条目测试请勿使用 `--write`；面板侧改动需要刷新页面才生效。
 
 ## 协议依据（实测记录）
 

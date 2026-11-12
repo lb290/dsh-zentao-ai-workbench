@@ -298,6 +298,32 @@ test('updateStatus: 不支持的动作立即报错；表单 302 → SESSION_EXPI
   await assert.rejects(client.updateStatus('bug', 1, 'close', {}), (err) => err.code === 'SESSION_EXPIRED');
 });
 
+test('表单 302 → user-deny：报「没有权限」而不是会话失效，也不触发重登', async (t) => {
+  // 真机实测：无权账号请求 story-close 会 302 到 /user-deny-story-close.html（不是 403）。
+  // 旧实现把任何 302 都当 SESSION_EXPIRED，用户只看到「禅道会话失效」并被反复静默重登。
+  const { srv, client, login } = await setup(t);
+  await login();
+  srv.deny('story', 'close');
+  await assert.rejects(client.updateStatus('story', 9, 'close', {}), (err) => {
+    assert.notEqual(err.code, 'SESSION_EXPIRED', '权限错误不能被归类成会话失效');
+    assert.match(err.message, /没有「close」权限/);
+    return true;
+  });
+  assert.equal(srv.state.loginCount, 1, '不应因为 302 去重登');
+  assert.equal(srv.postsFor('/story-close-9.html').length, 0, '表单都没打开就不该 POST');
+
+  srv.allow('story', 'close');
+  assert.deepEqual(await client.updateStatus('story', 9, 'close', {}), { message: '保存成功' });
+});
+
+test('备注表单 302 → user-deny：报权限错误，不当会话失效', async (t) => {
+  const { srv, client, login } = await setup(t);
+  await login();
+  srv.deny('bug', 'comment');
+  await assert.rejects(client.addComment('bug', 1, '结论'), /没有「备注」权限/);
+  assert.equal(srv.state.loginCount, 1);
+});
+
 // ---------------------------------------------------------------------------
 // 文件下载
 // ---------------------------------------------------------------------------
@@ -360,6 +386,20 @@ test('unwrapEnvelope / extractList: 双层信封与 dict/数组两种列表形�
   assert.equal(extractList('task', { tasks: [{ id: 1 }, null, 'x'] }).length, 1);
   assert.equal(extractList('story', { stories: [] }).length, 0);
   assert.equal(extractList('bug', {}).length, 0);
+  // 回归：旧实现用 `${kind}s` 拼键，story → 'storys'，于是真实 my-work-story.json
+  // （键名 stories，值是 {id: obj} 的 dict）永远解析出 0 条，面板「需求」整页为空。
+  assert.equal(extractList('story', { stories: { 9: { id: 9 } } }).length, 1, 'story 的载荷键是 stories');
+  assert.equal(extractList('story', { stories: [] }).length, 0);
+});
+
+test('列表: 真机形态 my-work-story.json（stories 为 dict）能读出条目', async (t) => {
+  const { srv, client, login } = await setup(t);
+  await login();
+  const r = await client.fetchListByUrl(`${srv.baseUrl}/my-work-story.json`);
+  assert.equal(r.kind, 'story');
+  assert.equal(r.items.length, 1, 'stories 以 id 为键时也要摊平成数组');
+  assert.equal(r.items[0].id, 9);
+  assert.equal(r.pager.total, 1);
 });
 
 test('detectKind: 浏览页路径 → kind，猜不出回退 bug', () => {
@@ -560,6 +600,45 @@ test('parseActionForm: <option selected> 读入默认值（selected="selected" /
     '/x',
   );
   assert.equal(bareValue.fields.status, 'resolved', '裸 value 也应支持');
+});
+
+test('parseActionForm: zui-create-datetimePicker 的 defaultValue 进字段；fileSelector/dropmenu 不污染', () => {
+  // 真机 task-finish-647 表单：realStarted / finishedDate 都在 datetimePicker 的 JSON 里，
+  // 只认 zui-create-picker 会让这两个字段拿不到值，提交时被服务端按空值驳回。
+  const html = `<form action="/task-finish-1.html">
+  <input type="text" name="currentConsumed" value="0" />
+  <div zui-create zui-create-datetimePicker="{&quot;name&quot;:&quot;finishedDate&quot;,&quot;defaultValue&quot;:&quot;2026-11-12 09:26:20&quot;}"></div>
+  <div zui-create zui-create-datetimePicker="{&quot;name&quot;:&quot;realStarted&quot;,&quot;defaultValue&quot;:&quot;2026-08-13 13:34:00&quot;}"></div>
+  <div zui-create zui-create-fileSelector="{&quot;name&quot;:&quot;files[]&quot;,&quot;mode&quot;:&quot;box&quot;}"></div>
+  <div zui-create zui-create-dropmenu="{&quot;name&quot;:&quot;execution&quot;,&quot;defaultValue&quot;:49}"></div>
+  <input type="hidden" name="uid" value="u1" />
+  </form>`;
+  const form = parseActionForm(html, '/task-finish-1.html');
+  assert.equal(form.fields.currentConsumed, '0');
+  assert.equal(form.fields.finishedDate, '2026-11-12 09:26:20', 'datetimePicker 默认值必须进字段');
+  assert.equal(form.fields.realStarted, '2026-08-13 13:34:00');
+  assert.equal(form.fields['files[]'], undefined, 'fileSelector 不产出表单值（由 hidden input 承载）');
+  assert.equal(form.fields.execution, undefined, 'dropmenu 不产出表单值');
+  assert.equal(form.uid, 'u1');
+});
+
+test('parseActionForm: radio 只取 checked 的那一项', () => {
+  const html = `<form>
+  <input type="radio" name="closedReason" value="done" />
+  <input type="radio" name="closedReason" value="cancel" checked="checked" />
+  <input type="radio" name="closedReason" value="other" />
+  </form>`;
+  assert.equal(parseActionForm(html, '/x').fields.closedReason, 'cancel');
+  assert.equal(
+    parseActionForm('<form><input type="radio" name="closedReason" value="done" /></form>', '/x').fields.closedReason,
+    undefined,
+    '没有任何 checked 时不能凭空取一个值',
+  );
+  assert.equal(
+    parseActionForm('<form><input type="radio" name="closedReason" value="done" checked /></form>', '/x').fields.closedReason,
+    'done',
+    '裸 checked 也应识别',
+  );
 });
 
 test('parseFormResponse: JSON success / fail(字段级 message) / 登录超时 / HTML 回执', () => {

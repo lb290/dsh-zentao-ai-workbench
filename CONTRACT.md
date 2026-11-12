@@ -272,10 +272,14 @@ facade.setDraft(text); facade.addAttachments(ids); facade.submit()
 - 详情：`GET /api.php/v1/{bugs|tasks|stories}/{id}`（cookie 鉴权，复数路径）。
 - 备注：`GET action-comment-{kind}-{id}.html` 取 `uid` →
   `POST action-comment-{kind}-{id}.html`，字段 `actioncomment=<p>文本</p>` + `uid`。
-- 状态：`GET {kind}-{action}-{id}.html` 解析表单默认值（hidden input + `zui-create-picker` 的
-  `defaultValue` + `zen-editor` 的 name）→ 合并覆盖项 → `POST` 同一地址（带 `uid`）。
+- 状态：`GET {kind}-{action}-{id}.html` 读表单默认值（hidden input + `option selected` + radio 的 `checked` +
+  `zui-create-picker` / `zui-create-datetimePicker` 的 `defaultValue` + `zen-editor` 的 name）→ 合并覆盖项 → `POST` 同地址。
   resolve 必填 `resolution`；实测 `resolution=fixed&resolvedBuild=trunk&assignedTo=demo&comment=...` 返回
   `{"result":"success","message":"保存成功"}`；close 只需 `comment+uid`。
+  - 302 要按目标分类：`→ user-login.html` 是会话失效；`→ user-deny-*.html` 是**没有该动作权限**
+    （实测 story-close 在无权账号下如此，HTTP 不是 403）；其它 302 多为当前状态不允许该操作。
+  - 列表载荷键名：`bugs` / `tasks` / `stories`（story 的复数是 `stories`，不是 `storys`）；
+    实测 `my-work-story.json` 的 `stories` 是「以 id 为键的对象」，需摊平成数组。
 - 图片下载：`GET /file-read-{name}`（登录态 cookie），用于真实图片附件。
 
 ## 7. 验收标准

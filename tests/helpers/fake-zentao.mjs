@@ -64,6 +64,15 @@ const TASK_LIST = [
   },
 ];
 
+const STORY_LIST = [
+  {
+    id: 9, title: '需求A', status: 'reviewing', pri: 2,
+    assignedTo: '张三', openedBy: '李四', openedDate: '2026-11-09 21:45:00',
+    stage: 'developed', category: 'feature',
+    desc: '<p>需求描述</p>',
+  },
+];
+
 const BUG_DETAIL_1 = {
   id: 1,
   title: '登录页报错',
@@ -139,7 +148,13 @@ function listPayload(kind) {
       tasks: TASK_LIST,
     };
   }
-  return { title: '示例产品-需求', pager: { recTotal: 0, pageID: 1, recPerPage: 10 }, stories: [] };
+  // 实测 my-work-story.json 的 stories 是「以 id 为键的对象」，不是数组；
+  // 载荷键名是 stories（story 的复数），内部用 dict 形态覆盖这个真实形状。
+  return {
+    title: '示例产品-需求',
+    pager: { recTotal: STORY_LIST.length, pageID: 1, recPerPage: 10 },
+    stories: Object.fromEntries(STORY_LIST.map((s) => [s.id, s])),
+  };
 }
 
 function listPageHtml(kind) {
@@ -231,6 +246,7 @@ export async function startFakeZentao(options = {}) {
     sessionId: '',
     sessionSeq: 0,
     expired: false,
+    denied: new Set(),
     loginCount: 0,
     loginFailures: 0,
     requests: [],
@@ -361,6 +377,10 @@ export async function startFakeZentao(options = {}) {
         redirect(res, `${pathPrefix}/user-login.html`);
         return;
       }
+      if (state.denied.has(`${kind2}-comment`)) {
+        redirect(res, `${pathPrefix}/user-deny-${kind2}-comment.html`);
+        return;
+      }
       if (req.method === 'GET') {
         send(res, 200, commentFormHtml(kind2, id));
         return;
@@ -388,6 +408,10 @@ export async function startFakeZentao(options = {}) {
       const [, kind3, act, id] = action;
       if (!authorized(req)) {
         redirect(res, `${pathPrefix}/user-login.html`);
+        return;
+      }
+      if (state.denied.has(`${kind3}-${act}`)) {
+        redirect(res, `${pathPrefix}/user-deny-${kind3}-${act}.html`);
         return;
       }
       if (req.method === 'GET') {
@@ -470,6 +494,17 @@ export async function startFakeZentao(options = {}) {
     /** 让所有已签发的 cookie 立即失效（模拟禅道会话过期）。 */
     expireSession() {
       state.expired = true;
+    },
+    /**
+     * 模拟「当前账号没有该动作权限」：禅道不会返回 403，而是 302 到 user-deny-*.html。
+     * 真实案例：story-close 在无权账号下 302 → /zentao/user-deny-story-close.html，
+     * 旧实现把任何 302 都当会话失效，用户只看到「禅道会话失效」并反复重登。
+     */
+    deny(kind, action) {
+      state.denied.add(`${kind}-${action}`);
+    },
+    allow(kind, action) {
+      state.denied.delete(`${kind}-${action}`);
     },
     close() {
       return new Promise((resolve) => {
