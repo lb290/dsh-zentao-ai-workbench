@@ -30,6 +30,9 @@
 - 通道名：`/dsh-zentao-ai-workbench`
 - client 调用：`ctx.connection.rpc.call('/dsh-zentao-ai-workbench', endpoint, payload)` → Promise
 - 返回信封：成功 `{ ok: true, value: <T> }`；失败 `{ ok: false, error: { code, message, details? } }`
+- 失败 `code`：`bad-request`（参数/协议错误）、`need-login`（未配置账号或会话失效，面板应引导重新登录）、
+  `BAD_IMAGE_URL`（图片地址非法/非同源）、`BAD_TARGET_DIR`（附件目录是系统目录）、
+  `NO_TARGET_DIR`（目录不存在或不是目录，通常意味着当前会话无 cwd）。
 
 ### 端点
 
@@ -130,7 +133,8 @@ interface WriteResult { kind: Kind, id: number, action: string, ok: boolean, mes
 ```js
 createZentaoWorkbenchService({logger, cacheTtlMs}) => {
   init(),                              // 启动恢复配置（含从 zentao-panel 导入）
-  configure({baseUrl, account, password, alias}), // upsert + 激活
+  login({baseUrl, account, password, alias}), // 事务式登录：真登成功才替换账号并落盘（失败不改动原账号）
+  configure({baseUrl, account, password, alias}), // 底层 upsert + 激活（同步、立即落盘；面板登录走 login）
   ensureLogin(),                       // cookie 失效用本机密码静默重登
   status(),
   listFromUrl({url, refresh}),         // 解析浏览页 URL → ListResult
@@ -139,9 +143,12 @@ createZentaoWorkbenchService({logger, cacheTtlMs}) => {
   writeBack({items}),                  // 批量，逐条返回结果，不因单条失败中断
   writeOne({kind, id, action, ...}),
   fetchImage({url}),
+  downloadFile({url, dir, name}),      // 附件落盘到 <dir>/.zentao-attachments/
   logout(id),
 }
 ```
+
+`cacheTtlMs` 生效于列表缓存（详情固定 10 分钟）；写回成功后相关列表/详情缓存立即失效，下一次 `list` 会重新拉取。
 
 RPC 层与 Agent 工具（`lib/tools.mjs`）都只调用上述方法，**不允许有第二套业务逻辑**。
 
@@ -153,7 +160,9 @@ RPC 层与 Agent 工具（`lib/tools.mjs`）都只调用上述方法，**不允�
 | `zentao_item_detail` | `{kind, id, saveDir?}` | 单条详情（描述/步骤/最近动态/备注图/附件）；传 `saveDir` 时非图片附件落盘并返回 `localPath` |
 | `zentao_add_comment` | `{kind, id, comment}` | 添加备注，返回禅道回执 |
 | `zentao_update_status` | `{kind, id, action, comment?, resolution?, resolvedBuild?, assignedTo?}` | 更新状态（resolve/close/activate/start/finish/...） |
-| `zentao_write_back` | `{items: WriteItem[]}` | 批量回写：多选条目的备注+状态一次提交 |
+| `zentao_write_back` | `{items: WriteItem[]}` | 批量回写：多选条目的备注+状态一次提交（≤50 条） |
+
+写工具的 `kind` 必填：不同种类的条目 id 会撞号（bug #12 与 task #12 同时存在），猜类型会把备注/状态写到无关条目上。批量回写里有一条缺 `kind` 就整批拒绝，不逐条猜。
 
 工具执行成功返回 `{ok:true, ...}`；失败返回 `{ok:false, message}`，不抛异常给模型。
 注入到会话的上下文文本末尾必须提示模型：处理完成后调用 `zentao_add_comment` / `zentao_update_status`

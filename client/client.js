@@ -65,11 +65,12 @@
         'started': '开始', 'finished': '完成', 'canceled': '取消', 'paused': '暂停',
         'restarted': '继续', 'changed': '变更', 'reviewed': '评审', 'commented-edit': '编辑备注',
       };
-      // 能力矩阵（CONTRACT.md 第 2 节，host 实现为准）
+      // 能力矩阵（与 host service.mjs 的 WRITE_ACTIONS 逐项一致，CONTRACT §2）
+      // 顺序：备注在最前，日常流转居中，终止动作（关闭/取消）靠后，重新激活放最后。
       var KIND_ACTIONS = {
         bug: ['comment', 'resolve', 'close', 'activate'],
-        task: ['comment', 'start', 'finish', 'close', 'cancel', 'pause'],
-        story: ['comment'],
+        task: ['comment', 'start', 'finish', 'pause', 'cancel', 'close', 'activate'],
+        story: ['comment', 'close', 'activate'],
       };
 
       // ───────────────────────── 样式（只用 --dsw-alias-* 语义 token） ─────────────────────────
@@ -196,6 +197,11 @@
       function injectCss() {
         if (cssInjected || typeof document === 'undefined' || !document.head) return;
         cssInjected = true;
+        try {
+          // 插件热重载会重新执行本模块（新模块实例，cssInjected 已复位）：
+          // 已存在同标记的 <style> 就复用，避免样式节点在 <head> 里越堆越多。
+          if (document.querySelector('style[data-dsh-zentao-ai-workbench]')) return;
+        } catch (e) { /* querySelector 不可用时照旧注入 */ }
         var el = document.createElement('style');
         el.setAttribute('data-dsh-zentao-ai-workbench', '1');
         el.textContent = CSS;
@@ -261,6 +267,15 @@
       var IMAGE_EXTS = { png: 1, jpg: 1, jpeg: 1, gif: 1, webp: 1, bmp: 1 };
       /** 单次下发最多挂多少张图（DSH 附件上限前的自我保护）。 */
       var IMAGE_MAX_ATTACHMENTS = 24;
+      /** attachImagesToDraft 的失败原因 → 状态栏文案（面板里不出现英文错误码）。 */
+      var IMAGE_REASON_LABEL = {
+        unavailable: '当前没有可用的会话输入接口',
+        unsupported: '当前会话不接受图片附件',
+        download: '图片下载失败，可展开条目用链接查看',
+        drafts: '附件草稿创建失败',
+        busy: '会话输入框正忙，稍后重试',
+      };
+      function imageReasonText(reason) { return IMAGE_REASON_LABEL[reason] || String(reason || '未知原因'); }
       /** 每条目上下文里最多带多少条最近动态。 */
       var ACTION_MAX_IN_CONTEXT = 30;
 
@@ -326,7 +341,7 @@
           for (var j = 0; j < atts.length; j++) {
             (function (item, att) {
               if (noDir) {
-                lines[itemKey(item)].push('- 附件：' + att.name + '（' + att.url + '）');
+                lines[itemKey(item)].push('- 附件：' + att.name + '（' + att.url + '；未保存到本地：没有可用的会话工作目录）');
                 failed.push({ name: att.name, message: 'unknown-cwd' });
                 return;
               }
@@ -361,7 +376,10 @@
             var x = list[i];
             if (!x || typeof x.url !== 'string' || !x.url || seen[x.url]) continue;
             seen[x.url] = 1;
-            lines.push('- [图片（' + label + '）：' + (x.name || ('image-' + (lines.length + 1))) + ']');
+            var nm = x.name || ('image-' + (lines.length + 1));
+            // 已知下载失败的图退化成「文件名 + 链接 + 原因」：模型至少知道原图在哪，不是一条死占位。
+            lines.push('- [图片（' + label + '）：' + nm + ']'
+              + (imageFailed.has(x.url) ? '（下载失败，原图：' + x.url + '）' : ''));
           }
         };
         push(it.images, '描述');
@@ -511,6 +529,9 @@
           var id = Number(e.id);
           if (!kind || !isFinite(id) || id <= 0) continue;
           var action = String(e.action || 'comment');
+          // 只发 host 矩阵里的动作（KIND_ACTIONS 与 host 逐项一致）：不认识的动作用成写备注，
+          // 绝不把非法状态流转发到禅道（host 会整条失败，用户只看到一条红字）。
+          if (KIND_ACTIONS[kind] && KIND_ACTIONS[kind].indexOf(action) < 0) action = 'comment';
           var item = { kind: kind, id: id, action: action };
           var comment = String(e.comment == null ? '' : e.comment).trim();
           if (comment) item.comment = comment;
@@ -900,11 +921,8 @@
       }
 
       /**
-       * 新会话公共前段：sessions.create({cwd}) → retain → scope → input.for → setDraft。
-       * 缺 sessions.create 时降级 uiWorkspace.startSession()（旧版行为，只能开视图+剪贴板）。
-       * @returns {Promise<{ok:true,sessionId,target}|{ok:false,mode,message}>}
+       * 目标会话的工作目录（新会话/当前会话一致的口径）：附件落盘要用它。
        */
-      /** 目标会话的工作目录（新会话/当前会话一致的口径）：附件落盘要用它。 */
       function resolveTargetCwd(choice) {
         try {
           if (choice && choice.cwd) return String(choice.cwd);
@@ -916,7 +934,22 @@
         } catch (e) { return null; }
       }
 
-      function createDraftSession(md, images, choice) {
+      /** 指定会话的权威工作目录（新建会话的 cwd 来源）；快照里还没出现就返回 null。 */
+      function sessionCwdOf(sessions, sessionId) {
+        try {
+          if (!sessions || !sessionId) return null;
+          var row = sessionRow(sessions, sessionId);
+          return (row && row.cwd) ? String(row.cwd) : null;
+        } catch (e) { return null; }
+      }
+
+      /**
+       * 新会话公共前段（不写草稿）：sessions.create({cwd}) → retain → scope → input.for。
+       * 返回的 cwd 优先取新会话自己的目录，供随后构建上下文时把附件落盘到正确位置。
+       * 缺 sessions.create 时由调用方降级 uiWorkspace.startSession() + 剪贴板。
+       * @returns {Promise<{ok:true,sessionId,target,cwd}|{ok:false,mode,message,sessionId?}>}
+       */
+      function openNewSession(choice) {
         var sessions = lookupService('sessions');
         var conversation = lookupService('conversation');
         if (!sessions || typeof sessions.create !== 'function') {
@@ -937,7 +970,6 @@
           .then(function () { return sessions.create(opts); })
           .then(function (sessionId) {
             if (!sessionId) throw new Error('sessions.create 未返回会话 id');
-            lastSessionId = sessionId;
             if (!conversation || !conversation.input || typeof conversation.input.for !== 'function') {
               return { ok: false, mode: 'unavailable', sessionId: sessionId, message: 'conversation 服务不可用，新会话输入接口缺失' };
             }
@@ -945,34 +977,113 @@
             if (!target) {
               return { ok: false, mode: 'unavailable', sessionId: sessionId, message: '会话输入接口不可用（会话可能未就绪）' };
             }
-            try { target.facade.setDraft(md); } catch (e) {
-              releaseTarget(target, 0);
-              return { ok: false, mode: 'unavailable', sessionId: sessionId, message: '草稿写入失败：' + ((e && e.message) || String(e)) };
-            }
-            return { ok: true, sessionId: sessionId, target: target, cwd: (opts && opts.cwd) || resolveTargetCwd(choice) };
+            return {
+              ok: true, sessionId: sessionId, target: target,
+              cwd: sessionCwdOf(sessions, sessionId) || (opts && opts.cwd) || resolveTargetCwd(choice),
+            };
           })
           .catch(function (err) {
             return { ok: false, mode: 'failed', message: '新会话创建失败：' + ((err && err.message) || String(err)) };
           });
       }
 
+      /** 建会话 + 写草稿（旧路径：上下文已先构建，cwd 只能取自当前会话）。 */
+      function createDraftSession(md, images, choice) {
+        return openNewSession(choice).then(function (p) {
+          if (!p.ok) return p;
+          try { p.target.facade.setDraft(md); } catch (e) {
+            releaseTarget(p.target, 0);
+            return { ok: false, mode: 'unavailable', sessionId: p.sessionId, message: '草稿写入失败：' + ((e && e.message) || String(e)) };
+          }
+          // 草稿真正写进去了才算「这个会话可用」，再把这它记为最近会话
+          lastSessionId = p.sessionId;
+          return p;
+        });
+      }
+
+      /** 草稿已写好：挂图片 → 250ms 后 submit → 3s 后释放后台 retain（不跳转，用户留在面板）。 */
+      function commitDraft(target, images) {
+        return attachImagesToDraft(images, target).then(function (att) {
+          setTimeout(function () {
+            try { if (typeof target.facade.submit === 'function') target.facade.submit(); } catch (e) { /* 已填草稿，交给用户 */ }
+            releaseTarget(target, 3000);
+          }, 250);
+          return att;
+        });
+      }
+
+      /** 图片/附件结果 → 状态栏尾巴（没选到图片时不提图片，避免「图片未挂上」的噪音）。 */
+      function imageSuffix(att, imageCount) {
+        if (!imageCount) return '';
+        if (att && att.ok) return '（含 ' + att.count + ' 张图片）';
+        return (att && att.reason) ? '（图片未挂上：' + imageReasonText(att.reason) + '）' : '';
+      }
+
       /**
-       * 「新建会话并处理」：新会话自动发送（不跳转，用户留在面板）。
-       * 前段失败 → 降级 uiWorkspace.startSession() + 剪贴板；提交后 3s 释放后台 retain。
+       * 「新建会话并处理」旧路径：上下文已构建好再建会话。
+       * 前段失败 → 降级 uiWorkspace.startSession() + 剪贴板。
        */
       function dispatchToNewSession(md, images, choice) {
         return createDraftSession(md, images, choice).then(function (p) {
           if (!p.ok) return degradeNewSession(md, images, p);
-          var target = p.target;
-          return attachImagesToDraft(images, target).then(function (att) {
-            var suffix = att && att.ok ? '（含 ' + att.count + ' 张图片）' : '';
-            setTimeout(function () {
-              try { if (typeof target.facade.submit === 'function') target.facade.submit(); } catch (e) { /* 已填草稿，交给用户 */ }
-              releaseTarget(target, 3000);
-            }, 250);
+          return commitDraft(p.target, images).then(function (att) {
             return {
-              ok: true, mode: 'dispatched', sessionId: p.sessionId,
-              message: '已新建会话并下发任务背景' + suffix,
+              ok: true, mode: 'dispatched', sessionId: p.sessionId, att: att, cwd: p.cwd,
+              message: '已新建会话并下发任务背景' + imageSuffix(att, Array.isArray(images) ? images.length : 0),
+            };
+          });
+        });
+      }
+
+      /**
+       * 「新建会话并处理」主路径：先建会话 → 用它自己的 cwd 构建上下文（非图片附件落盘到该 cwd）
+       * → 写草稿 → 挂图片 → submit。顺序反了的话「今天第一批」会在无当前会话时把附件退化成裸链接。
+       * 上下文构建失败时由 build 自己退化成卡片摘要；真的抛错也保留会话并给出可粘贴的提示。
+       * @param {(cwd: string|null) => Promise<{md:string,images:Array,att?:object,degraded?:boolean}>} build
+       * @param {{workspaceId?:string,cwd?:string}} [choice]
+       */
+      function dispatchToNewSessionWithCwd(build, choice) {
+        var buildSafe = function (cwd) {
+          return Promise.resolve()
+            .then(function () { return build(cwd); })
+            .then(function (built) {
+              var b = built || {};
+              return {
+                md: String(b.md == null ? '' : b.md),
+                images: Array.isArray(b.images) ? b.images : [],
+                att: b.att,
+                degraded: Boolean(b.degraded),
+              };
+            });
+        };
+        return openNewSession(choice).then(function (p) {
+          if (!p.ok) {
+            // 会话没建起来：仍要把上下文交给用户（空白会话 + 剪贴板），不能只说失败
+            return buildSafe(null).then(function (built) { return degradeNewSession(built.md, built.images, p); });
+          }
+          var target = p.target;
+          var cwd = p.cwd || resolveTargetCwd(choice);
+          return buildSafe(cwd).then(function (built) {
+            try { target.facade.setDraft(built.md); } catch (e) {
+              releaseTarget(target, 0);
+              return {
+                ok: false, mode: 'unavailable', sessionId: p.sessionId, att: built.att,
+                message: '新会话已建好，但草稿写入失败：' + ((e && e.message) || String(e)) + '（会话保留，可手动粘贴上下文）',
+              };
+            }
+            lastSessionId = p.sessionId;
+            return commitDraft(target, built.images).then(function (att) {
+              var suffix = imageSuffix(att, built.images.length) + (built.degraded ? '（详情读取失败，已用卡片摘要生成上下文）' : '');
+              return {
+                ok: true, mode: 'dispatched', sessionId: p.sessionId, att: built.att, cwd: cwd,
+                message: '已新建会话并下发任务背景' + suffix,
+              };
+            });
+          }, function (err) {
+            releaseTarget(target, 0);
+            return {
+              ok: false, mode: 'failed', sessionId: p.sessionId,
+              message: '新会话已建好，但上下文准备失败：' + ((err && err.message) || String(err)) + '（会话保留，可手动粘贴上下文）',
             };
           });
         });
@@ -1121,6 +1232,57 @@
         );
       }
 
+      /**
+       * 自绘弹层的可访问性：Esc 关闭、初始焦点移入弹层、Tab 焦点在弹层内循环。
+       * 宿主不会替覆盖层代管焦点，缺了这些键盘用户只能困在背景面板上。
+       * @param {() => void} onClose 关闭回调
+       */
+      function useDialogA11y(onClose) {
+        useEffect(function () {
+          if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+          var FOCUSABLE = 'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
+          var maskOf = function () {
+            try { return document.querySelector('[data-ztaw-dialog]'); } catch (e) { return null; }
+          };
+          var focusables = function (mask) {
+            var nodes = mask ? mask.querySelectorAll(FOCUSABLE) : [];
+            var out = [];
+            for (var i = 0; i < nodes.length; i++) out.push(nodes[i]);
+            return out;
+          };
+          var mask = maskOf();
+          try {
+            // 初始焦点优先落到首个输入控件（登录/备注），键盘用户不必先从背景 Tab 进来。
+            var first = mask
+              ? (mask.querySelector('input:not([type="hidden"]),textarea,select') || focusables(mask)[0])
+              : null;
+            if (first && typeof first.focus === 'function') first.focus();
+          } catch (e2) { /* 焦点转移失败不影响弹层使用 */ }
+          var onKey = function (e) {
+            if (!e || typeof e.key !== 'string') return;
+            if (e.key === 'Escape' || e.key === 'Esc') {
+              try { e.preventDefault(); e.stopPropagation(); } catch (e3) { /* 忽略 */ }
+              onClose();
+              return;
+            }
+            if (e.key !== 'Tab') return;
+            var list = focusables(mask);
+            if (!list.length) return;
+            var idx = list.indexOf(document.activeElement);
+            var last = list.length - 1;
+            if (e.shiftKey && idx <= 0) {
+              try { e.preventDefault(); list[last].focus(); } catch (e4) { /* 忽略 */ }
+            } else if (!e.shiftKey && idx === last) {
+              try { e.preventDefault(); list[0].focus(); } catch (e5) { /* 忽略 */ }
+            }
+          };
+          document.addEventListener('keydown', onKey, true);
+          return function () {
+            try { document.removeEventListener('keydown', onKey, true); } catch (e6) { /* 已清理 */ }
+          };
+        }, []);
+      }
+
       function LoginModal(props) {
         var status = props.status || {};
         var [baseUrl, setBaseUrl] = useState(status.baseUrl || '');
@@ -1129,6 +1291,7 @@
         var [alias, setAlias] = useState(status.alias || '');
         var [busy, setBusy] = useState(false);
         var [err, setErr] = useState('');
+        useDialogA11y(props.onClose);
 
         var submit = function () {
           if (busy) return;
@@ -1142,7 +1305,7 @@
         };
         var accounts = Array.isArray(status.accounts) ? status.accounts : [];
 
-        return h('div', { className: 'ztaw-mask', role: 'dialog', 'aria-modal': 'true', 'aria-label': '禅道账号设置' },
+        return h('div', { className: 'ztaw-mask', role: 'dialog', 'aria-modal': 'true', 'data-ztaw-dialog': '1', 'aria-label': '禅道账号设置' },
           h('div', { className: 'ztaw-modal' },
             h('div', { className: 'ztaw-modal-head' },
               h('span', { className: 'ztaw-modal-title' }, '禅道账号设置'),
@@ -1213,7 +1376,8 @@
       function WritebackModal(props) {
         var rows = props.rows || [];
         var results = props.results || {};
-        return h('div', { className: 'ztaw-mask', role: 'dialog', 'aria-modal': 'true', 'aria-label': '回写禅道' },
+        useDialogA11y(props.onClose);
+        return h('div', { className: 'ztaw-mask', role: 'dialog', 'aria-modal': 'true', 'data-ztaw-dialog': '1', 'aria-label': '回写禅道' },
           h('div', { className: 'ztaw-modal' },
             h('div', { className: 'ztaw-modal-head' },
               h('span', { className: 'ztaw-modal-title' }, '回写禅道'),
@@ -1301,6 +1465,10 @@
 
         var detailPromise = useRef({});
         var urlTouched = useRef(false);
+        // 列表请求序号：旧请求的迟到响应必须丢弃，否则会把新 URL 的列表覆盖回旧结果。
+        var readSeq = useRef(0);
+        // 「新建会话」在途锁：busy 是渲染状态，同一 tick 的两次点击可能都读到空值。
+        var dispatchLock = useRef(false);
 
         var say = function (text, tone) {
           var n = { text: text, tone: tone || 'info' };
@@ -1361,9 +1529,12 @@
         var doRead = function (refresh) {
           var target = String(url || '').trim();
           if (!target) { say('请先填写禅道浏览链接', 'warn'); return Promise.resolve(null); }
+          var seq = readSeq.current + 1;
+          readSeq.current = seq;
           setBusy('read');
           say(refresh ? '正在刷新禅道状态…' : '正在读取禅道列表…', 'info');
           return rpcValue('list', { url: target, refresh: Boolean(refresh) }).then(function (r) {
+            if (seq !== readSeq.current) return null; // 已被更新的请求取代：不写列表、不动 busy
             setBusy('');
             if (!r || !Array.isArray(r.items)) { say('返回数据格式异常：缺少 items', 'err'); return null; }
             setList(r);
@@ -1383,6 +1554,7 @@
               + (r.title ? ' · ' + r.title : ''), 'ok');
             return r;
           }).catch(function (e) {
+            if (seq !== readSeq.current) return null;
             setBusy('');
             say('读取失败：' + ((e && e.message) || '未知错误'), 'err');
             return null;
@@ -1521,7 +1693,7 @@
             return prepareContext(merged, {}).then(function (p) {
               return insertToCurrentChat(p.md, selectionImages(p.merged)).then(function (r) {
                 setBusy('');
-                if (r && r.mode === 'service') say('已加入当前会话草稿' + (r.attached ? '（含 ' + r.attached + ' 张图片）' : '') + attachSummary(p.att) + (r.imageError ? '；图片未挂上：' + r.imageError : ''), 'ok');
+                if (r && r.mode === 'service') say('已加入当前会话草稿' + (r.attached ? '（含 ' + r.attached + ' 张图片）' : '') + attachSummary(p.att) + (r.imageError ? '；图片未挂上：' + imageReasonText(r.imageError) : ''), 'ok');
                 else if (r && r.mode === 'dom') say('已写入当前输入框（服务不可用，走 DOM 降级）' + attachSummary(p.att), 'warn');
                 else if (r && r.failed) say('无法写入会话，复制到剪贴板也失败，请手动复制上下文', 'err');
                 else say('没有可用的会话输入接口，上下文已复制到剪贴板，请粘贴发送', 'warn');
@@ -1534,18 +1706,37 @@
         };
 
         var newSession = function () {
-          if (!requireSelection() || busy) return;
+          if (!requireSelection() || busy || dispatchLock.current) return;
+          // busy 是渲染状态，同一 tick 的两次点击可能都读到空值：用 ref 锁住，绝不建出两个会话
+          dispatchLock.current = true;
           setBusy('dispatch');
           say('正在新建会话并下发…', 'info');
-          ensureDetails(selectedItems).then(function (merged) {
-            return prepareContext(merged, {}).then(function (p) {
-              return dispatchToNewSession(p.md, selectionImages(p.merged), {}).then(function (r) {
-                setBusy('');
-                if (r && r.ok) say(r.message + attachSummary(p.att), 'ok');
-                else say((r && r.message) || '新建会话失败', 'warn');
+          // 先建会话，再用新会话自己的 cwd 构建上下文（非图片附件落盘到该 cwd）：顺序反了会在
+          // 「今天第一批、还没有当前会话」时把附件全部退化成裸链接。
+          var build = function (cwd) {
+            return ensureDetails(selectedItems).then(function (merged) {
+              return prepareContext(merged, cwd ? { cwd: cwd } : {}).then(function (p) {
+                return { md: p.md, images: selectionImages(p.merged), att: p.att };
               });
+            }).catch(function () {
+              // 详情/落盘链路异常时退化成卡片摘要上下文：会话仍可用，不出现「静默半发送」
+              var cards = selectedItems || [];
+              return {
+                md: buildContext(cards, instruction, { url: (list && list.url) || url }),
+                images: selectionImages(cards),
+                att: { saved: 0, failed: [] },
+                degraded: true,
+              };
             });
-          }).catch(function (e) {
+          };
+          var finish = function (r) {
+            dispatchLock.current = false;
+            setBusy('');
+            if (r && r.ok) say(r.message + attachSummary(r.att), 'ok');
+            else say((r && r.message) || '新建会话失败', 'warn');
+          };
+          dispatchToNewSessionWithCwd(build, {}).then(finish).catch(function (e) {
+            dispatchLock.current = false;
             setBusy('');
             say('新建会话失败：' + ((e && e.message) || ''), 'err');
           });
@@ -1591,12 +1782,13 @@
         };
 
         var submitWriteback = function () {
+          if (wbSubmitting) return; // 重入保护：双击/重复触发只允许一个在途写回
           var payload = buildWriteItems(wbRows);
           if (!payload.length) { say('没有可提交的回写条目', 'warn'); return; }
           setWbSubmitting(true);
           say('正在回写 ' + payload.length + ' 条…', 'info');
           rpcValue('writeback', { items: payload }).then(function (v) {
-            var results = (v && v.results) || [];
+            var results = (v && Array.isArray(v.results)) ? v.results : [];
             var map = {};
             var okCount = 0;
             for (var i = 0; i < results.length; i++) {
@@ -1606,9 +1798,13 @@
             }
             setWbResults(map);
             setWbSubmitting(false);
-            say('回写完成：成功 ' + okCount + ' / ' + results.length + ' 条', okCount === results.length ? 'ok' : 'warn');
-            // 成功后自动刷新状态
-            if (list) doRead(true);
+            // 分母用「提交了几条」而不是「返回了几条」：宿主少返回/不返回结果时不能误报成功。
+            var summary = '回写完成：成功 ' + okCount + ' / ' + payload.length + ' 条'
+              + (results.length < payload.length ? '（宿主只返回 ' + results.length + ' 条结果）' : '');
+            var tone = (payload.length > 0 && okCount === payload.length && results.length === payload.length) ? 'ok' : 'warn';
+            say(summary, tone);
+            // 成功后自动刷新状态；刷新自己的提示会盖掉回写结论，所以在刷新结束后把结论写回状态栏。
+            if (list) doRead(true).then(function () { say(summary, tone); });
           }).catch(function (e) {
             setWbSubmitting(false);
             say('回写失败：' + ((e && e.message) || '未知错误'), 'err');
@@ -1715,7 +1911,10 @@
             h('button', { type: 'button', className: 'ztaw-btn', disabled: Boolean(busy), onClick: copyContext }, '复制上下文'),
           ),
 
-          h('div', { className: 'ztaw-statusbar' + (notice.tone && notice.tone !== 'info' ? ' ' + notice.tone : '') },
+          h('div', {
+            className: 'ztaw-statusbar' + (notice.tone && notice.tone !== 'info' ? ' ' + notice.tone : ''),
+            role: 'status', 'aria-live': 'polite',
+          },
             h('span', { className: 'ztaw-txt', title: notice.text }, notice.text),
           ),
 
@@ -1746,7 +1945,9 @@
        * 「加入当前会话」就能精确落在这个会话上。
        */
       function ZentaoAiHeaderAction(props) {
-        var sessionId = props && props.zentaoAiSessionId;
+        // 头部动作是 session 作用域 slot：sessionId 同时以 standard prop 和 inject 结果两种方式到达，
+        // 任一可用就记下，保证「加入当前会话」落在这个会话上。
+        var sessionId = (props && (props.zentaoAiSessionId || props.sessionId)) || null;
         return h('button', {
           type: 'button',
           className: 'ztaw-btn ztaw-btn-sm',
@@ -1797,6 +1998,9 @@
       // ───────────────────────── 注册 ─────────────────────────
       var inject = ['slots', 'connection'];
       var leftWired = false;
+      // apply 里创建的资源（slot 注册 / 样式 / 定时器）必须可回收：插件禁用或热重载会再执行一次 apply，
+      // 不回收就会在同一页面里叠出第二个图标、第二个面板和第二个样式节点。
+      var overlayTimer = null;
 
       /**
        * 注册左侧栏全局面板：sidebar.panellist（图标行）+ main（keyed slot，key 与图标 id 同值）。
@@ -1829,7 +2033,7 @@
       }
 
       function registerHeaderAction() {
-        appCtx.slots.inject('conversation.session.header.actions', function () {
+        return appCtx.slots.inject('conversation.session.header.actions', function () {
           return appCtx.slots.register({
             name: 'conversation.session.header.actions',
             id: 'zentao-ai',
@@ -1842,27 +2046,59 @@
       function registerOverlay() {
         if (leftWired) return;
         try {
-          appCtx.slots.inject('shell.overlay', function () {
+          return appCtx.slots.inject('shell.overlay', function () {
             return appCtx.slots.register({ name: 'shell.overlay', id: OVERLAY_ID, order: 20 }, ZentaoFab);
           });
         } catch (e) {
           try { console.error('[dsh-zentao-ai-workbench] overlay slot unavailable', e); } catch (e2) { /* 忽略 */ }
         }
+        return undefined;
       }
 
       function apply(ctx) {
         appCtx = ctx;
         if (!hasReact) return; // node 自检环境：不注册 UI，只保留 _test 可用的服务上下文
         injectCss();
-        try { registerLeftSidebar(); } catch (e) {
+        var disposers = [];
+        try {
+          var stopLeft = registerLeftSidebar();
+          if (typeof stopLeft === 'function') disposers.push(stopLeft);
+        } catch (e) {
           try { console.error('[dsh-zentao-ai-workbench] register panel failed', e); } catch (e2) { /* 忽略 */ }
         }
-        try { registerHeaderAction(); } catch (e) {
+        try {
+          var stopHeader = registerHeaderAction();
+          if (typeof stopHeader === 'function') disposers.push(stopHeader);
+        } catch (e) {
           try { console.error('[dsh-zentao-ai-workbench] register header action failed', e); } catch (e2) { /* 忽略 */ }
         }
         if (typeof setTimeout === 'function') {
-          setTimeout(function () { if (!leftWired) registerOverlay(); }, 2500);
+          if (overlayTimer) { try { clearTimeout(overlayTimer); } catch (e) { /* 忽略 */ } overlayTimer = null; }
+          var timer = setTimeout(function () {
+            if (overlayTimer === timer) overlayTimer = null;
+            if (!leftWired) registerOverlay();
+          }, 2500);
+          overlayTimer = timer;
+          // 只清理自己那一次 apply 的定时器：重载后新旧两代 apply 可能交错，别把新定时器掐掉。
+          disposers.push(function () {
+            try { clearTimeout(timer); } catch (e) { /* 已清理 */ }
+            if (overlayTimer === timer) overlayTimer = null;
+          });
         }
+        var dispose = function () {
+          leftWired = false;
+          for (var i = 0; i < disposers.length; i++) {
+            try { disposers[i](); } catch (e) { /* 已清理 */ }
+          }
+          disposers.length = 0;
+        };
+        // 用 ctx.effect 把清理权交给插件 fiber（CONTRACT §5 的装载形态；旧版宿主没有 effect 就只返回清理函数）。
+        if (typeof ctx.effect === 'function') {
+          try { ctx.effect(function () { return dispose; }, 'dsh-zentao-ai-workbench: ui'); } catch (e) {
+            try { console.warn('[dsh-zentao-ai-workbench] ctx.effect unavailable, UI cleanup not owned', e); } catch (e2) { /* 忽略 */ }
+          }
+        }
+        return dispose;
       }
 
       exports.name = 'dsh-zentao-ai-workbench';
@@ -1898,6 +2134,8 @@
         ACTION_MAX_IN_CONTEXT: ACTION_MAX_IN_CONTEXT,
         describeItem: describeItem,
         defaultCommentFor: defaultCommentFor,
+        imageReasonText: imageReasonText,
+        useDialogA11y: useDialogA11y,
         // 存储
         loadTemplates: loadTemplates,
         saveTemplates: saveTemplates,
@@ -1910,11 +2148,16 @@
         rpcValue: rpcValue,
         currentSessionId: currentSessionId,
         resolveTargetCwd: resolveTargetCwd,
+        sessionCwdOf: sessionCwdOf,
         currentInputTarget: currentInputTarget,
         inputTargetFor: inputTargetFor,
         insertToCurrentChat: insertToCurrentChat,
+        openNewSession: openNewSession,
         createDraftSession: createDraftSession,
+        commitDraft: commitDraft,
         dispatchToNewSession: dispatchToNewSession,
+        dispatchToNewSessionWithCwd: dispatchToNewSessionWithCwd,
+        KIND_ACTIONS: KIND_ACTIONS,
         attachImagesToDraft: attachImagesToDraft,
         fetchImageValue: fetchImageValue,
         bytesFromBase64: bytesFromBase64,
